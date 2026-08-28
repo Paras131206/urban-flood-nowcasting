@@ -5,3 +5,6 @@ folium>=0.16
 pandas>=2.0
 requests>=2.31
 pytest>=8.0
+# Reads GPS out of a reported photo's EXIF. Optional: without it the reporter
+# picks the location by hand and everything else still works.
+Pillow>=10.0

@@ -7,16 +7,17 @@ How the network is built
 ------------------------
 The CSV gives ten drain locations. Those alone are not a road network, so a
 handful of landmarks people actually name are added, and every node is joined
-to its nearest neighbours. That is enough to reason about detours. It is a
-simplification - the edges are straight lines, not real streets - and a
-deployment would swap in OSM road geometry. The routing logic does not change
-when that happens.
+to its three nearest neighbours. That produces a connected graph over Bandra
+which is enough to reason about detours. It is a simplification — the edges
+are straight lines, not real streets — and a deployment would swap in OSM
+road geometry. The routing logic does not change when that happens.
 
 Risk as a percentage
 --------------------
 The engine works in centimetres, but people think in percentages, so depth is
 mapped onto a 0-100 scale where 50 cm is 100%. That puts the 40% trigger at
-20 cm, which is about where a small car starts to struggle.
+20 cm, which is about where a small car starts to struggle — a sensible place
+to send someone a different way.
 """
 from __future__ import annotations
 
@@ -26,9 +27,13 @@ from typing import Dict, List, Optional, Tuple
 
 from flood_engine import Drain, haversine_m
 
+# 50 cm of water counts as 100% risk. 40% is therefore 20 cm, roughly the
+# depth at which a hatchback stalls.
 DEPTH_AT_FULL_RISK_CM = 50.0
 DEFAULT_AVOID_ABOVE_PCT = 40.0
 
+# Places people give as an origin or destination, so the picker reads like a
+# map rather than a list of manholes.
 LANDMARKS: Dict[str, Tuple[float, float]] = {
     "Bandra Station": (19.0544, 72.8406),
     "Bandra Reclamation": (19.0470, 72.8200),
@@ -49,6 +54,9 @@ LANDMARKS: Dict[str, Tuple[float, float]] = {
 NEIGHBOURS_PER_NODE = 4
 
 
+# --------------------------------------------------------------------------- #
+# Risk
+# --------------------------------------------------------------------------- #
 def risk_pct(depth_cm: float) -> float:
     """Depth in centimetres as a 0-100 risk percentage."""
     return round(min(depth_cm / DEPTH_AT_FULL_RISK_CM * 100.0, 100.0), 1)
@@ -66,6 +74,9 @@ def advice_for(pct: float) -> str:
     return "Passable"
 
 
+# --------------------------------------------------------------------------- #
+# Graph
+# --------------------------------------------------------------------------- #
 class Network:
     def __init__(self, drains: Dict[str, Drain]):
         self.points: Dict[str, Tuple[float, float]] = {
@@ -85,7 +96,7 @@ class Network:
             for other in ranked[:NEIGHBOURS_PER_NODE]:
                 if other not in self.edges[node]:
                     self.edges[node].append(other)
-                if node not in self.edges[other]:
+                if node not in self.edges[other]:      # keep it two-way
                     self.edges[other].append(node)
 
     def distance(self, a: str, b: str) -> float:
@@ -95,6 +106,9 @@ class Network:
         return min(self.points, key=lambda n: haversine_m((lat, lon), self.points[n]))
 
 
+# --------------------------------------------------------------------------- #
+# Directions
+# --------------------------------------------------------------------------- #
 COMPASS = ["north", "north-east", "east", "south-east",
            "south", "south-west", "west", "north-west"]
 
@@ -108,6 +122,9 @@ def bearing(a: Tuple[float, float], b: Tuple[float, float]) -> str:
     return COMPASS[int((degrees + 22.5) // 45) % 8]
 
 
+# --------------------------------------------------------------------------- #
+# Search
+# --------------------------------------------------------------------------- #
 def _search(net: Network, start: str, goal: str, cost_of) -> Optional[List[str]]:
     """A* over the node graph. cost_of(a, b) returns metres, or inf to block."""
     queue = [(0.0, start)]
@@ -143,9 +160,9 @@ def plan(
 ) -> dict:
     """Work out the safest way from origin to destination.
 
-    depths maps drain NAME to predicted depth in cm. Landmarks carry no depth
-    of their own; they take the risk of the nearest drain, because a junction
-    fifty metres from a flooded gully is not dry.
+    `depths` maps drain NAME to predicted depth in cm. Landmarks carry no
+    depth of their own; they take the risk of the nearest drain, because a
+    junction fifty metres from a flooded gully is not dry.
     """
     net = Network(drains)
 
@@ -159,6 +176,7 @@ def plan(
                 key=lambda d: haversine_m(coords, net.points[d]),
             )
             distance = haversine_m(coords, net.points[nearest_drain])
+            # A landmark inherits the nearby drain's risk, fading with distance.
             fade = max(0.0, 1.0 - distance / 600.0)
             node_risk[node] = round(risk_pct(depths.get(nearest_drain, 0.0)) * fade, 1)
 
@@ -175,6 +193,7 @@ def plan(
         if worst >= avoid_above_pct:
             return float("inf")
         blended = max(node_risk[a], node_risk[b])
+        # A road at 30% is not blocked, but it is worth going around.
         return net.distance(a, b) * (1.0 + (blended / 100.0) * 6.0)
 
     shortest = _search(net, origin, destination, plain_cost)

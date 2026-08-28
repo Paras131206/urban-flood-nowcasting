@@ -1,0 +1,12 @@
+[
+  {
+    "at": "2026-08-28T16:50:34+00:00",
+    "number": "9322297644",
+    "label": "",
+    "level": "SEVERE",
+    "body": "Bandra flood alert (SEVERE) in 15 min: Mithi River Outlet, BKC Main Canal, Turner Road Side +6 more. Deepest Mithi River Outlet 96cm. Rising fast at Mithi River Outlet. Avoid these roads.",
+    "delivered": false,
+    "gateway": null,
+    "error": "No SMS gateway configured, so the message was queued rather than sent."
+  }
+]
