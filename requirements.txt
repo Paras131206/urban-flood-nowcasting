@@ -1,5 +1,7 @@
-streamlit
-pandas
-folium
-streamlit-folium
-requests
+streamlit>=1.36
+streamlit-folium>=0.20
+streamlit-autorefresh>=1.0
+folium>=0.16
+pandas>=2.0
+requests>=2.31
+pytest>=8.0
