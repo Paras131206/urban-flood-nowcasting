@@ -168,7 +168,7 @@ with left:
             "Drains_To": "Flows into", "Depth_cm": "Now (cm)",
             "Peak_Depth_cm": "Peak (cm)", "Risk_Level": "Level",
         }),
-        hide_index=True, use_container_width=True,
+        hide_index=True, width='stretch',
     )
 
 with right:
@@ -187,7 +187,7 @@ with right:
         })
     st.dataframe(
         pd.DataFrame(thresholds).sort_values("Floods at (mm/hr)"),
-        hide_index=True, use_container_width=True,
+        hide_index=True, width='stretch',
     )
 
 st.subheader(f"Next three hours - {worst['Segment_Name']}")
