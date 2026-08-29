@@ -1,0 +1,11 @@
+drain_id,name,lat,lon,elevation_m,hand_m,source
+BND-P01,Mithi River Outlet,19.0512,72.842,1.8,1.47,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-P02,BKC Main Canal,19.067,72.8685,2.5,3.47,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-S01,SV Road Collector,19.062,72.8355,4.5,3.15,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-S02,Hill Road Middle,19.0582,72.8301,5.1,4.88,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-S03,Linking Road North,19.0655,72.838,4.0,3.32,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-T01,Pali Hill Upper,19.061,72.825,18.2,8.52,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-T02,Chimbai Low Point,19.052,72.825,1.2,6.26,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-T03,Turner Road Side,19.0612,72.832,3.8,0.68,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-T04,Mount Mary Slope,19.048,72.821,12.0,17.95,"ASF GLO-30 HAND v1 (2021), ImageServer identify"
+BND-T05,Bandra Talao Inlet,19.06,72.84,2.8,0.0,"ASF GLO-30 HAND v1 (2021), ImageServer identify"

@@ -27,6 +27,7 @@ from streamlit_folium import st_folium
 
 import alerts
 import flood_engine as fe
+import hand
 import terrain
 
 st.set_page_config(page_title="Bandra Drainage Monitor", layout="wide")
@@ -367,7 +368,9 @@ for row in rows:
             f"<b>Risk factor {risk['score']}</b> ({risk['band']})<br>"
             f"Confidence {conf['pct']}% "
             f"({conf['low_cm']:.0f}-{conf['high_cm']:.0f} cm)<br>"
-            f"Ground {drain.elevation_m:.1f} m &middot; "
+            + (f"HAND {drain.hand_m:.1f} m above drainage &middot; "
+               if drain.hand_m is not None else "")
+            + f"Ground {drain.elevation_m:.1f} m &middot; "
             f"{sealed * 100:.0f}% sealed &middot; C={row['Runoff_C']}<br>"
             f"{row['Drain_Type']} &middot; {row['Blockage_Pct']}% blocked<br>"
             f"drains to {row['Drains_To']} &middot; "

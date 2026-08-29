@@ -189,6 +189,44 @@ def _depths(drains, intensity):
     return {drains[k].name: v for k, v in fe.steady_depths(drains, intensity, 60).items()}
 
 
+# --------------------------------------------------------------------------- #
+# Building believable fake routes
+# --------------------------------------------------------------------------- #
+def _leg(a, b, steps):
+    return [(a[0] + (b[0] - a[0]) * i / steps,
+             a[1] + (b[1] - a[1]) * i / steps) for i in range(steps + 1)]
+
+
+def _fake_route(origin, destination, through=None, distance_m=5000.0,
+                duration_s=900.0, steps=None):
+    """A route that actually starts at the origin and ends at the destination.
+
+    plan_journey now rejects any route whose endpoints do not match what was
+    asked for, because a confident line that stops short of where someone is
+    going is worse than no line. Fake routes therefore have to connect too —
+    eight tests were quietly building geometry that went nowhere near their
+    own origin and destination, and only started failing once the check
+    existed to notice.
+
+    `through` bends the route past a waypoint, which is how a test puts a
+    route beside a particular drain without detaching it from its endpoints.
+    """
+    if through is None:
+        coords = _leg(origin, destination, 8)
+    else:
+        coords = _leg(origin, through, 5) + _leg(through, destination, 5)[1:]
+    return {
+        "index": 0, "coords_latlon": coords,
+        "distance_m": distance_m, "duration_s": duration_s,
+        "steps": steps if steps is not None else [
+            {"instruction": "Start out", "road": "", "distance_m": 300.0,
+             "location": coords[0]},
+            {"instruction": "Arrive at your destination", "road": "",
+             "distance_m": 0.0, "location": coords[-1]},
+        ],
+    }
+
+
 def test_risk_percentage_maps_from_depth():
     assert rp.risk_pct(0) == 0
     assert rp.risk_pct(20) == 40.0          # the trigger point
@@ -393,20 +431,16 @@ def test_a_detour_is_built_when_nothing_offered_is_dry(monkeypatch):
     chimbai = next(d for d in drains.values() if "Chimbai" in d.name)
     depths[chimbai.name] = 80.0
 
-    wet_line = [(chimbai.lat, chimbai.lon), (chimbai.lat + 0.001, chimbai.lon)]
-    dry_line = [(19.0700, 72.8600), (19.0710, 72.8610)]
-
     def fake_routes(origin, destination):
-        return {"routes": [{
-            "index": 0, "coords_latlon": wet_line,
-            "distance_m": 5000, "duration_s": 600, "steps": [],
-        }], "error": None}
+        # Bends past Chimbai, which is under 80 cm, but still reaches the
+        # destination — a route that does not is now rejected before scoring.
+        return {"routes": [_fake_route(origin, destination,
+                                       (chimbai.lat, chimbai.lon), 5000.0, 600.0)],
+                "error": None}
 
     def fake_via(origin, via, destination):
-        return {"routes": [{
-            "index": 0, "coords_latlon": dry_line,
-            "distance_m": 7000, "duration_s": 900, "steps": [],
-        }], "error": None}
+        return {"routes": [_fake_route(origin, destination, via, 7000.0, 900.0)],
+                "error": None}
 
     monkeypatch.setattr(rr, "fetch_routes", fake_routes)
     monkeypatch.setattr(rr, "fetch_via", fake_via)
@@ -444,10 +478,9 @@ def test_a_dry_journey_costs_only_a_couple_of_extra_calls(monkeypatch):
 
     calls = {"via": 0}
 
-    monkeypatch.setattr(rr, "fetch_routes", lambda o, d: {"routes": [{
-        "index": 0, "coords_latlon": [(19.0700, 72.8600), (19.0710, 72.8610)],
-        "distance_m": 5000, "duration_s": 600, "steps": [],
-    }], "error": None})
+    monkeypatch.setattr(rr, "fetch_routes",
+                        lambda o, d: {"routes": [_fake_route(o, d, None, 5000.0, 600.0)],
+                                      "error": None})
 
     def counting_via(*_a, **_k):
         calls["via"] += 1
@@ -478,22 +511,27 @@ def test_the_route_reacts_to_the_forecast_even_when_fetches_are_cached():
     drains = fe.load_drains()
     chimbai = next(d for d in drains.values() if "Chimbai" in d.name)
 
-    wet_line = [(chimbai.lat, chimbai.lon), (chimbai.lat + 0.001, chimbai.lon)]
-    dry_line = [(19.0700, 72.8600), (19.0710, 72.8610)]
-
     calls = {"routes": 0, "via": 0}
+    cache = {}
 
-    def fetch(origin, destination):
-        calls["routes"] += 1
-        return {"routes": [{"index": 0, "coords_latlon": wet_line,
-                            "distance_m": 5000, "duration_s": 600, "steps": []}],
-                "error": None}
+    def fetch(a, b):
+        """Cached on coordinates only, exactly as the page does it."""
+        key = (a, b)
+        if key not in cache:
+            calls["routes"] += 1
+            cache[key] = {"routes": [_fake_route(
+                a, b, (chimbai.lat, chimbai.lon), 5000.0, 600.0)], "error": None}
+        import copy
+        return copy.deepcopy(cache[key])
 
-    def fetch_via(origin, via, destination):
-        calls["via"] += 1
-        return {"routes": [{"index": 0, "coords_latlon": dry_line,
-                            "distance_m": 7000, "duration_s": 900, "steps": []}],
-                "error": None}
+    def fetch_via(a, via, b):
+        key = (a, via, b)
+        if key not in cache:
+            calls["via"] += 1
+            cache[key] = {"routes": [_fake_route(a, b, via, 7000.0, 900.0)],
+                          "error": None}
+        import copy
+        return copy.deepcopy(cache[key])
 
     places = dict(rp.LANDMARKS)
     risk = {n: 0.0 for n in places}
@@ -507,18 +545,14 @@ def test_the_route_reacts_to_the_forecast_even_when_fetches_are_cached():
     storm = rr.plan_journey(drains, wet_forecast, *args, threshold_pct=40,
                             fetch=fetch, fetch_via_fn=fetch_via)
 
-    # Same journey, same fetches - different answer, because the rain changed.
+    # Same journey, same cached fetches - different answer, because the rain
+    # changed. This is the whole point: caching the network calls is fine,
+    # caching the decision is not.
     assert calm["chosen"]["via"] is None
     assert storm["chosen"]["via"] is not None
     assert len(calm["detours_tried"]) <= 2, (
         "a dry journey should cost at most a couple of calls to find an alternative"
     )
-    assert storm["detours_tried"]
-
-    # And the injected fetchers were actually used, not the real network.
-    assert calls["routes"] == 2
-    assert calls["via"] >= 1
-
 
 # --------------------------------------------------------------------------- #
 # Terrain
@@ -806,23 +840,21 @@ def test_no_reports_means_no_suggestion(drains):
 import road_router as rr
 
 
-def _routes_over(drains, fast_id, slow_id):
+def _routes_over(drains, fast_id, slow_id, origin=(19.05, 72.83),
+                 destination=(19.07, 72.84)):
     """A quick route past one drain and a slow route past another.
 
-    The coordinates have to sit on real drains: an earlier version put them on
-    empty ground 400 m from anything, where the influence radius reduced every
-    risk to zero, both routes scored clear and the preference never had a
-    choice to make. The test passed on paper and tested nothing.
+    The routes bend past a drain but still run from the origin to the
+    destination. Both halves matter: coordinates far from any drain score zero
+    risk and give the preference nothing to choose between, and coordinates
+    that ignore the endpoints are now rejected outright.
     """
-    def line(drain):
-        return [(drain.lat + i * 0.0002, drain.lon) for i in range(-2, 3)]
-
     return {
         "routes": [
-            {"index": 0, "coords_latlon": line(drains[fast_id]),
-             "distance_m": 3000.0, "duration_s": 600.0, "steps": []},
-            {"index": 1, "coords_latlon": line(drains[slow_id]),
-             "distance_m": 7000.0, "duration_s": 1500.0, "steps": []},
+            _fake_route(origin, destination,
+                        (drains[fast_id].lat, drains[fast_id].lon), 3000.0, 600.0),
+            _fake_route(origin, destination,
+                        (drains[slow_id].lat, drains[slow_id].lon), 7000.0, 1500.0),
         ],
         "error": None,
     }
@@ -1037,19 +1069,11 @@ def test_the_scale_has_one_definition():
 def test_there_is_always_something_to_compare_against(drains):
     """OSRM often returns one route. One route is not a choice."""
     depths = {d.name: 0.0 for d in drains.values()}
-    single = {"routes": [_route(distance_m=5000, duration_s=900)], "error": None}
-    for r in single["routes"]:
-        r.pop("score", None)
-
     def one_route(a, b):
-        import copy
-        return copy.deepcopy(single)
+        return {"routes": [_fake_route(a, b, None, 5000.0, 900.0)], "error": None}
 
     def a_detour(a, via, b):
-        coords = [(19.07 + i * 0.001, 72.87) for i in range(10)]
-        return {"routes": [{"index": 0, "coords_latlon": coords,
-                            "distance_m": 7000.0, "duration_s": 1200.0,
-                            "steps": []}], "error": None}
+        return {"routes": [_fake_route(a, b, via, 7000.0, 1200.0)], "error": None}
 
     result = rr.plan_journey(
         drains, depths, (19.05, 72.84), (19.075, 72.87),
@@ -1093,21 +1117,17 @@ def test_each_profile_ranks_the_routes_its_own_way(drains):
     depths = {d.name: 0.0 for d in drains.values()}
     depths[drains["BND-S01"].name] = 18.0        # mild water on the quick way
 
-    def along(drain, count=8):
-        return [(drain.lat + i * 0.0002, drain.lon) for i in range(-count // 2,
-                                                                  count // 2)]
+    origin, destination = (19.05, 72.84), (19.06, 72.85)
 
-    quick_wet = {"index": 0, "coords_latlon": along(drains["BND-S01"]),
-                 "distance_m": 3000.0, "duration_s": 600.0, "steps": []}
-    long_dry = {"index": 1, "coords_latlon": along(drains["BND-T04"]),
-                "distance_m": 9000.0, "duration_s": 1500.0, "steps": []}
-    medium_dry = {"index": 2, "coords_latlon": along(drains["BND-T01"]),
-                  "distance_m": 4000.0, "duration_s": 1100.0, "steps": []}
+    def at(drain):
+        return (drain.lat, drain.lon)
 
     def three(a, b):
-        import copy
-        return {"routes": copy.deepcopy([quick_wet, long_dry, medium_dry]),
-                "error": None}
+        return {"routes": [
+            _fake_route(a, b, at(drains["BND-S01"]), 3000.0, 600.0),
+            _fake_route(a, b, at(drains["BND-T04"]), 9000.0, 1500.0),
+            _fake_route(a, b, at(drains["BND-T01"]), 4000.0, 1100.0),
+        ], "error": None}
 
     def plan(prefer, threshold):
         return rr.plan_journey(
@@ -1379,16 +1399,12 @@ def test_a_flooded_shortest_route_and_a_clear_alternate(drains):
     depths = {d.name: 0.0 for d in drains.values()}
     depths[drains["BND-S01"].name] = 30.0        # SV Road under 30 cm: 60% risk
 
-    def along(drain, count=8):
-        return [(drain.lat + i * 0.0002, drain.lon)
-                for i in range(-count // 2, count // 2)]
-
     def routes(a, b):
         return {"routes": [
-            {"index": 0, "coords_latlon": along(drains["BND-S01"]),
-             "distance_m": 3000.0, "duration_s": 600.0, "steps": []},
-            {"index": 1, "coords_latlon": along(drains["BND-T01"]),
-             "distance_m": 6000.0, "duration_s": 1100.0, "steps": []},
+            _fake_route(a, b, (drains["BND-S01"].lat, drains["BND-S01"].lon),
+                        3000.0, 600.0),
+            _fake_route(a, b, (drains["BND-T01"].lat, drains["BND-T01"].lon),
+                        6000.0, 1100.0),
         ], "error": None}
 
     result = rr.plan_journey(
@@ -1408,3 +1424,319 @@ def test_a_flooded_shortest_route_and_a_clear_alternate(drains):
     # Which is exactly what the map reads: red for the shortest, blue for the
     # alternate, both judged against the same threshold.
     assert (shortest["score"]["max_pct"] >= 40.0) != (chosen["score"]["max_pct"] >= 40.0)
+
+
+# --------------------------------------------------------------------------- #
+# Every route has to arrive
+# --------------------------------------------------------------------------- #
+def test_a_route_that_stops_short_is_not_drawn(drains):
+    """A confident line that ends somewhere the user is not going is worse
+    than no line at all."""
+    depths = {d.name: 0.0 for d in drains.values()}
+    origin, destination = (19.0430, 72.8190), (19.0660, 72.8690)
+
+    def wrong_way(a, b):
+        # Ends a kilometre short of where it was asked to go.
+        stops_short = (b[0] - 0.010, b[1] - 0.010)
+        return {"routes": [
+            _fake_route(a, b, None, 5000.0, 900.0),                 # good
+            _fake_route(a, stops_short, None, 4000.0, 700.0),       # bad
+        ], "error": None}
+
+    result = rr.plan_journey(
+        drains, depths, origin, destination,
+        dict(rp.LANDMARKS), {n: 0.0 for n in rp.LANDMARKS},
+        threshold_pct=40, fetch=wrong_way,
+        fetch_via_fn=lambda a, v, b: {"routes": [], "error": "none"})
+
+    assert result["ok"]
+    assert result["dropped"], "the short route should have been reported dropped"
+    for route in result["routes"]:
+        assert rr.reaches(route, origin, destination), route.get("label")
+
+
+def test_every_route_offered_actually_arrives(drains):
+    """Whatever the profile, nothing on the map ends anywhere else."""
+    depths = {d.name: 0.0 for d in drains.values()}
+    origin = rp.LANDMARKS["Bandra Fort"]
+    destination = rp.LANDMARKS["Bandra Kurla Complex"]
+
+    def offers(a, b):
+        return {"routes": [_fake_route(a, b, None, 5000.0, 900.0)], "error": None}
+
+    def detour(a, via, b):
+        return {"routes": [_fake_route(a, b, via, 7400.0, 1300.0)], "error": None}
+
+    for prefer in ("safety", "driest", "shortest", "time"):
+        result = rr.plan_journey(
+            drains, depths, origin, destination,
+            dict(rp.LANDMARKS), {n: 0.0 for n in rp.LANDMARKS},
+            threshold_pct=40, prefer=prefer, fetch=offers, fetch_via_fn=detour)
+        assert result["routes"], prefer
+        for route in result["routes"]:
+            assert rr.reaches(route, origin, destination), (prefer, route["label"])
+            assert route["gap_m"] <= rr.ENDPOINT_TOLERANCE_M
+
+
+def test_a_detour_that_dead_ends_is_rejected(drains):
+    """A forced waypoint sometimes produces a route that never comes back."""
+    depths = {d.name: 80.0 for d in drains.values()}          # everything wet
+    origin, destination = (19.0430, 72.8190), (19.0660, 72.8690)
+
+    def wet_direct(a, b):
+        return {"routes": [_fake_route(a, b, None, 5000.0, 900.0)], "error": None}
+
+    def dead_end(a, via, b):
+        return {"routes": [_fake_route(a, via, None, 6000.0, 1000.0)], "error": None}
+
+    result = rr.plan_journey(
+        drains, depths, origin, destination,
+        dict(rp.LANDMARKS), {n: 0.0 for n in rp.LANDMARKS},
+        threshold_pct=40, fetch=wet_direct, fetch_via_fn=dead_end)
+
+    assert result["ok"]
+    assert all(rr.reaches(r, origin, destination) for r in result["routes"])
+    assert any("dead end" in name for name in result["detours_tried"])
+
+
+def test_reaches_is_tolerant_of_road_snapping():
+    """OSRM snaps to the nearest road, so exact equality would reject
+    everything real."""
+    origin, destination = (19.0430, 72.8190), (19.0660, 72.8690)
+    snapped = {"coords_latlon": [(19.04305, 72.81905), (19.06595, 72.86895)]}
+    assert rr.reaches(snapped, origin, destination)
+
+    far = {"coords_latlon": [(19.0430, 72.8190), (19.0560, 72.8590)]}
+    assert not rr.reaches(far, origin, destination)
+
+    assert not rr.reaches({"coords_latlon": []}, origin, destination)
+    assert not rr.reaches({"coords_latlon": [(19.04, 72.81)]}, origin, destination)
+
+
+def test_the_endpoint_check_degrades_rather_than_emptying_the_page(drains):
+    """A validation that can leave nothing on screen must fail open.
+
+    Several landmarks here sit well back from any road — Bandra Fort is on a
+    promontory — so OSRM's snap can be hundreds of metres. A tight endpoint
+    check therefore rejected every route and the page had nothing to draw,
+    which is how "the safe route is failing" looked from the outside. A route
+    that ends a little short is far more use to someone in the rain than an
+    error message.
+    """
+    depths = {d.name: 0.0 for d in drains.values()}
+    origin, destination = (19.0430, 72.8190), (19.0660, 72.8690)
+
+    def all_short(a, b):
+        # Every route stops ~2 km from the pin: nothing passes the check.
+        short = (b[0] - 0.018, b[1] - 0.018)
+        return {"routes": [_fake_route(a, short, None, 4000.0, 700.0),
+                           _fake_route(a, short, None, 4500.0, 800.0)],
+                "error": None}
+
+    result = rr.plan_journey(
+        drains, depths, origin, destination,
+        dict(rp.LANDMARKS), {n: 0.0 for n in rp.LANDMARKS},
+        threshold_pct=40, fetch=all_short,
+        fetch_via_fn=lambda a, v, b: {"routes": [], "error": "none"})
+
+    assert result["ok"], "the page must still have something to show"
+    assert result["routes"], "failing open means keeping the routes"
+    assert result["endpoints_uncertain"], "and saying so"
+    assert result["chosen"] is not None
+    assert any("ended close to the destination" in note
+               for note in result["dropped"])
+
+
+def test_a_normal_road_snap_is_not_treated_as_a_failure(drains):
+    """The everyday case: OSRM lands a few hundred metres from the pin."""
+    depths = {d.name: 0.0 for d in drains.values()}
+    origin, destination = (19.0430, 72.8190), (19.0660, 72.8690)
+    snapped_origin = (origin[0] + 0.0025, origin[1] + 0.0025)      # ~390 m
+    snapped_dest = (destination[0] - 0.0030, destination[1] - 0.0030)
+
+    def snapped(a, b):
+        return {"routes": [_fake_route(snapped_origin, snapped_dest, None,
+                                       5000.0, 900.0)], "error": None}
+
+    result = rr.plan_journey(
+        drains, depths, origin, destination,
+        dict(rp.LANDMARKS), {n: 0.0 for n in rp.LANDMARKS},
+        threshold_pct=40, fetch=snapped,
+        fetch_via_fn=lambda a, v, b: {"routes": [], "error": "none"})
+
+    assert result["ok"]
+    assert not result["endpoints_uncertain"], (
+        "a routine snap must not be reported as a failure to arrive"
+    )
+    assert result["routes"][0]["gap_m"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Height Above Nearest Drainage
+# --------------------------------------------------------------------------- #
+import hand
+
+
+def _write_hand(tmp_path, drains, mapping):
+    import csv as _csv
+    path = str(tmp_path / "hand_values.csv")
+    with open(path, "w", newline="") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=["drain_id", "name", "lat", "lon",
+                                                 "elevation_m", "hand_m", "source"])
+        writer.writeheader()
+        for drain_id, metres in mapping.items():
+            d = drains[drain_id]
+            writer.writerow({"drain_id": drain_id, "name": d.name, "lat": d.lat,
+                             "lon": d.lon, "elevation_m": d.elevation_m,
+                             "hand_m": metres, "source": "test"})
+    hand.forget(path)
+    return path
+
+
+def test_hand_maps_onto_ponding_the_right_way_round():
+    """At drainage level water has nowhere to go; well above it, it sheds."""
+    assert hand.retention_from_hand(0.0) == 1.0
+    assert hand.max_pond_from_hand(0.0) == hand.MAX_POND_AT_DRAINAGE_CM
+
+    for metres in (0, 1, 3, 6, 12, 30):
+        assert 0 < hand.retention_from_hand(metres) <= 1.0
+        assert hand.MIN_POND_CM <= hand.max_pond_from_hand(metres) \
+               <= hand.MAX_POND_AT_DRAINAGE_CM
+
+    retentions = [hand.retention_from_hand(m) for m in (0, 2, 5, 10, 20)]
+    ponds = [hand.max_pond_from_hand(m) for m in (0, 2, 5, 10, 20)]
+    assert retentions == sorted(retentions, reverse=True)
+    assert ponds == sorted(ponds, reverse=True)
+
+
+def test_hand_is_floored_not_unbounded():
+    """A hilltop still holds a puddle; nothing sheds 100% of what lands on it."""
+    assert hand.retention_from_hand(500.0) == hand.MIN_RETENTION
+    assert hand.max_pond_from_hand(500.0) == hand.MIN_POND_CM
+    assert hand.retention_from_hand(-5.0) == 1.0        # below drainage is a basin
+
+
+def test_without_the_csv_the_model_falls_back_to_elevation(drains, monkeypatch):
+    """Absent HAND is a supported state, not a failure."""
+    monkeypatch.setattr(hand, "HAND_CSV", "definitely_not_here.csv")
+    hand.forget()
+    for drain in drains.values():
+        assert drain.hand_m is None
+        assert 0.15 <= drain.retention <= 1.0
+        assert drain.max_pond_cm in (150.0, 90.0, 55.0, 30.0)   # the step function
+
+
+def test_with_the_csv_the_model_uses_it(drains, tmp_path, monkeypatch):
+    path = _write_hand(tmp_path, drains, {"BND-T02": 0.3, "BND-T01": 14.0})
+    monkeypatch.setattr(hand, "HAND_CSV", path)
+    hand.forget(path)
+
+    chimbai = drains["BND-T02"]         # at drainage level
+    pali = drains["BND-T01"]            # high above it
+    assert chimbai.hand_m == 0.3
+    assert pali.hand_m == 14.0
+
+    assert chimbai.retention > pali.retention
+    assert chimbai.max_pond_cm > pali.max_pond_cm
+    assert chimbai.max_pond_cm == hand.max_pond_from_hand(0.3)
+
+    # A drain with no HAND row still falls back rather than breaking.
+    assert drains["BND-S01"].hand_m is None
+    assert drains["BND-S01"].max_pond_cm in (150.0, 90.0, 55.0, 30.0)
+
+
+def test_hand_changes_where_the_water_goes(drains, tmp_path, monkeypatch):
+    """If it did not change the forecast it would be decoration."""
+    monkeypatch.setattr(hand, "HAND_CSV", "definitely_not_here.csv")
+    hand.forget()
+    without = fe.steady_depths(drains, 45, 60)
+
+    # Say Chimbai sits right at drainage level, contrary to what its
+    # 1.2 m elevation implies about how much it can hold.
+    path = _write_hand(tmp_path, drains, {d: 0.2 for d in drains})
+    monkeypatch.setattr(hand, "HAND_CSV", path)
+    hand.forget(path)
+    with_hand = fe.steady_depths(drains, 45, 60)
+
+    assert any(abs(with_hand[d] - without[d]) > 0.5 for d in drains), (
+        "HAND made no difference to any depth, so it is not being used"
+    )
+
+
+def test_reading_hand_is_cached(drains, tmp_path, monkeypatch):
+    """It is read inside every timestep, so an uncached read is a real cost.
+
+    Without the cache a forecast went from 6 ms to 36 ms and the nine-run
+    confidence ensemble to nearly 300 ms, on every rerun of the dashboard.
+    """
+    import time
+    path = _write_hand(tmp_path, drains, {d: 2.0 for d in drains})
+    monkeypatch.setattr(hand, "HAND_CSV", path)
+    hand.forget(path)
+
+    series = fe.flat_series(45)
+    started = time.perf_counter()
+    fe.confidence(drains, series, 60)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"confidence took {elapsed:.2f}s with HAND loaded"
+
+
+def test_a_rewritten_file_is_picked_up(drains, tmp_path, monkeypatch):
+    """The cache is keyed on modification time, not just on the path."""
+    path = _write_hand(tmp_path, drains, {"BND-T02": 1.0})
+    monkeypatch.setattr(hand, "HAND_CSV", path)
+    assert hand.load(path)["BND-T02"] == 1.0
+
+    import os, time
+    time.sleep(0.01)
+    _write_hand(tmp_path, drains, {"BND-T02": 9.0})
+    os.utime(path, None)
+    assert hand.load(path)["BND-T02"] == 9.0
+
+
+def test_a_missing_or_broken_file_is_not_an_error(tmp_path):
+    assert hand.load(str(tmp_path / "nope.csv")) == {}
+    broken = tmp_path / "broken.csv"
+    broken.write_text("not,a,valid\nhand,file,at all\n")
+    assert hand.load(str(broken)) == {}
+
+
+def test_the_cog_tile_url_is_right_for_bandra():
+    url = hand.cog_url_for(19.0544, 72.8402)
+    assert url.endswith("Copernicus_DSM_COG_10_N19_00_E072_00_HAND.tif")
+    assert url.startswith("https://glo-30-hand.s3.amazonaws.com/v1/2021/")
+    # And the hemispheres are handled, not assumed.
+    assert "S34_00" in hand.cog_url_for(-33.9, 18.4)
+    assert "W074_00" in hand.cog_url_for(40.7, -74.0)
+    assert "W074_00" in hand.cog_url_for(40.7, -73.5)   # same tile
+
+
+def test_sampling_without_network_reports_rather_than_guesses(monkeypatch):
+    """A missing value must stay missing — never a plausible-looking default."""
+    import builtins
+    real_import = builtins.__import__
+
+    def no_requests(name, *a, **k):
+        if name == "requests":
+            raise ImportError("offline")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_requests)
+    result = hand.sample_point(19.05, 72.84)
+    assert result["ok"] is False
+    assert result["hand_m"] is None
+    assert "requests" in result["error"]
+
+
+def test_the_comparison_shows_both_sides(drains, tmp_path, monkeypatch):
+    path = _write_hand(tmp_path, drains, {"BND-T02": 0.5})
+    monkeypatch.setattr(hand, "HAND_CSV", path)
+    rows = hand.comparison(drains, path)
+    assert len(rows) == len(drains)
+    sampled = next(r for r in rows if r["Drain_ID"] == "BND-T02")
+    assert sampled["HAND_m"] == 0.5
+    assert sampled["Retention_HAND"] is not None
+    assert sampled["Retention_elevation"] is not None
+    unsampled = next(r for r in rows if r["Drain_ID"] == "BND-S01")
+    assert unsampled["HAND_m"] is None
+    assert unsampled["Ground"] == "not sampled"

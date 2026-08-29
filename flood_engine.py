@@ -178,13 +178,37 @@ class Drain:
         return MAX_POND_AREA_M2 * math.sqrt(spread / MAX_POND_AREA_M2)
 
     @property
+    def hand_m(self) -> Optional[float]:
+        """Height above the nearest drainage, in metres, if it was sampled.
+
+        None when hand_values.csv has not been fetched, which is a supported
+        state — the two properties below then fall back to elevation.
+        """
+        try:
+            import hand
+            return hand.load().get(self.drain_id)
+        except Exception:                               # noqa: BLE001
+            return None
+
+    @property
     def max_pond_cm(self) -> float:
         """How deep water can get here before it spreads somewhere else.
 
         A low basin like Chimbai genuinely goes knee-deep and stays there; a
         hillside sheds long before that. Without this ceiling the model stacks
         water up indefinitely and reports depths no street has ever seen.
+
+        Height above the nearest drainage is the right measure of "basin",
+        and elevation above sea level is only a proxy for it — a junction 8 m
+        above the sea but half a metre above its drain is a basin, and the
+        step function below cannot see that. So HAND is used when it has been
+        fetched, and the steps remain as the fallback.
         """
+        above_drainage = self.hand_m
+        if above_drainage is not None:
+            import hand
+            return hand.max_pond_from_hand(above_drainage)
+
         if self.elevation_m < 2.0:
             return 150.0
         if self.elevation_m < 4.0:
@@ -212,9 +236,14 @@ class Drain:
         """How much of an overflow stays put rather than running off further.
 
         A low, flat basin holds nearly everything that arrives. A hillside
-        sheds it. Elevation is the only terrain signal in the CSV, so it
-        stands in for slope here; a DEM would do this properly.
+        sheds it. With HAND fetched this is measured against the local
+        drainage, which is the quantity that actually governs it; without it,
+        elevation above sea level stands in, as it always did.
         """
+        above_drainage = self.hand_m
+        if above_drainage is not None:
+            import hand
+            return hand.retention_from_hand(above_drainage)
         return min(max(1.0 - self.elevation_m / 20.0, 0.15), 1.0)
 
 
@@ -557,6 +586,8 @@ def assess(drains: Dict[str, Drain], series: List[Tuple[int, float]],
             "Design_Capacity_m3s": drain.capacity_m3s,
             "Real_Capacity_m3s": round(capacity_now(drain, tide_m), 2),
             "Runoff_C": drain.runoff_c,
+            "HAND_m": drain.hand_m,
+            "Terrain_source": "HAND" if drain.hand_m is not None else "elevation",
             "Drains_To": drains[drain.downstream].name if drain.downstream else
                          ("PUMPED" if drain.pumped else "Outfall"),
             "Upstream_Area_ha": round(drain.upstream_area_m2 / 10_000, 1),

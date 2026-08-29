@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import flood_engine as fe
+import hand
 import history as hist
 import reports as rep
 import route_planner as rp
@@ -317,6 +318,72 @@ difference is large enough to change which roads flood.
             height=300,
         )
 
+    st.divider()
+    st.subheader("Height Above Nearest Drainage")
+
+    hand_values = hand.load()
+    if hand_values:
+        st.success(
+            f"**Using ASF's global 30 m HAND dataset** for {len(hand_values)} "
+            "of the drains — derived from the 2021 Copernicus GLO-30 DEM, "
+            "published under CC0."
+        )
+    else:
+        st.info(
+            "**Not fetched yet.** Run `python3 fetch_hand.py` once and commit "
+            "`hand_values.csv`. The model then measures ponding against the "
+            "local drainage instead of against sea level."
+        )
+
+    st.markdown(
+        """
+Two numbers in the model — how much of an overflow stays put, and how deep it
+gets before spreading — were both computed from **elevation above sea level**.
+The question they are actually asking is *how far above the nearest drainage
+is this?*, and those are different quantities:
+
+- a junction 8 m above the sea but 0.4 m above its drain **floods**
+- a junction 3 m above the sea but 3 m above its drain **does not**
+
+Absolute elevation cannot tell those apart. HAND can, and it is a published
+terrain descriptor (Rennó et al. 2008; Nobre et al. 2011) rather than a
+coefficient invented for this project.
+        """
+    )
+
+    st.dataframe(
+        pd.DataFrame([{
+            "Spot": r["Segment_Name"],
+            "Elevation (m)": r["Elevation_m"],
+            "HAND (m)": "—" if r["HAND_m"] is None else r["HAND_m"],
+            "Retention, elevation": r["Retention_elevation"],
+            "Retention, HAND": "—" if r["Retention_HAND"] is None
+                               else r["Retention_HAND"],
+            "Max pond, elevation": f"{r['Max_pond_elevation_cm']:.0f} cm",
+            "Max pond, HAND": "—" if r["Max_pond_HAND_cm"] is None
+                              else f"{r['Max_pond_HAND_cm']:.0f} cm",
+            "Ground": r["Ground"],
+        } for r in hand.comparison(drains)]),
+        hide_index=True, width="stretch",
+    )
+
+    st.warning(
+        "**HAND has never heard of a storm drain.** It comes from natural "
+        "topography, and Mumbai floods because an engineered pipe network is "
+        "undersized, silted and tide-locked — none of which appears in a DEM. "
+        "On its own HAND would be a *worse* predictor here than the network "
+        "model. The combination is the point: HAND says how flood-prone the "
+        "ground is, the network model says whether the pipes can cope."
+    )
+    st.caption(
+        "Two further limits worth stating. GLO-30 comes from a surface model, "
+        "so in dense low-rise Mumbai it partly sees rooftops rather than "
+        "streets and urban HAND is noisier than rural. And 30 m pixels are "
+        "coarse for one junction — fine for a catchment, approximate for a "
+        "kerb. Source: ASF Global 30 m HAND, CC0."
+    )
+
+    st.divider()
     st.info(
         "**Why this matters beyond the map.** Pali Hill's tree cover is not "
         "just pleasant — it is flood defence for Chimbai below it. Roughly "
@@ -711,6 +778,18 @@ with tabs[6]:
          "full stop, with a warning about what it is driving into. A fire "
          "tender wades through 45 cm where a scooter is in trouble at 10."),
 
+        ("HAND (Height Above Nearest Drainage)",
+         "How far a point sits above the drainage it flows into, measured "
+         "along the flow path rather than as the crow flies — so it "
+         "normalises terrain to the local drainage instead of to sea level. "
+         "Low HAND means a basin: water arriving has nowhere to go. It is what "
+         "decides, in this model, how deep a spot ponds and how much of an "
+         "overflow stays there. Sampled from ASF's global 30 m dataset, "
+         "derived from the Copernicus GLO-30 DEM. Worth knowing what it "
+         "cannot do: it is built from natural topography and knows nothing "
+         "about pipes, so it complements the drainage network model rather "
+         "than replacing it."),
+
         ("Data delay",
          fe.latency_note() + " Every reading on the dashboard is older than it "
          "looks, and the app says so rather than implying it is live to the "
@@ -758,6 +837,13 @@ with tabs[7]:
              "Status": "Estimated",
              "Status / next step": "The least reliable and most influential input. "
                               "Should come from CCTV inspection records."},
+            {"Input": "Height Above Nearest Drainage",
+             "Source": "ASF global 30 m HAND (Copernicus GLO-30, 2021), CC0",
+             "Status": "Real, published" if hand.load() else "Available, not fetched",
+             "Status / next step": "Sets ponding depth and retention against "
+                                   "the local drainage rather than sea level. "
+                                   "The same data is on S3 as COGs if a "
+                                   "continuous raster is wanted."},
             {"Input": "Land cover / runoff coefficient",
              "Source": "terrain.py, estimated from land use",
              "Status": "Estimated",

@@ -519,12 +519,11 @@ with st.expander("What the voice guidance says"):
 # --------------------------------------------------------------------------- #
 fmap = folium.Map(location=BANDRA, zoom_start=13, tiles="OpenStreetMap")
 
-# Colour says one thing only: can you get through. Blue is passable, red is
-# not. That holds for the shortest route and for every alternate, so a flooded
-# alternate can never be mistaken for a safe one just because it is the
-# alternate — and the whole point of the page reads off the map at a glance:
-# red line through the water, blue line around it.
-SAFE_COLOUR = "#1565C0"          # bold blue: passable for this vehicle
+# Blue is the route to take. Red is a route you cannot. Grey-blue is a
+# passable option that is not the best one — visible, but not competing for
+# attention with the recommendation.
+BEST_COLOUR = "#1565C0"          # bold blue: the recommended way
+OTHER_COLOUR = "#7FA8CC"         # muted blue: passable, but not the pick
 FLOODED_COLOUR = "#C62828"       # red: worst point is past the line
 
 # Which route is "the shortest" — the one someone would take without this app.
@@ -533,9 +532,8 @@ FLOODED_COLOUR = "#C62828"       # red: worst point is past the line
 direct_offers = [r for r in routes if not r.get("via")] or routes
 shortest = min(direct_offers, key=lambda r: r["distance_m"])
 
-layer_shortest = folium.FeatureGroup(name="Shortest route", show=True)
-layer_alternates = folium.FeatureGroup(name="Alternate routes", show=True)
-layer_selected = folium.FeatureGroup(name="Selected route", show=True)
+layer_routes = folium.FeatureGroup(name="Routes", show=True)
+layer_best = folium.FeatureGroup(name="Best route", show=True)
 layer_water = folium.FeatureGroup(name="Flooded stretches", show=True)
 layer_drains = folium.FeatureGroup(name="Drains", show=True)
 
@@ -545,17 +543,27 @@ def is_passable(route) -> bool:
 
 
 def route_colour(route) -> str:
-    return SAFE_COLOUR if is_passable(route) else FLOODED_COLOUR
+    if not is_passable(route):
+        return FLOODED_COLOUR
+    return BEST_COLOUR if route is chosen else OTHER_COLOUR
+
+
+def route_role(route) -> str:
+    if route is chosen:
+        return "BEST"
+    if route is shortest:
+        return "SHORTEST"
+    return "ALTERNATE"
 
 
 def route_tooltip(route, index) -> str:
     when = rr.eta(route, intensity_at_departure, minutes_ahead)
-    kind = "SHORTEST" if route is shortest else "ALTERNATE"
     state = "passable" if is_passable(route) else "FLOODED"
-    if route is selected:
-        kind = "SELECTED - " + kind
+    marker = route_role(route)
+    if route is selected and route is not chosen:
+        marker = "SELECTED " + marker
     return (
-        f"{kind} ({state}) — {route.get('label', f'Option {index + 1}')}: "
+        f"{marker} ({state}) — {route.get('label', f'Option {index + 1}')}: "
         f"{route['distance_m'] / 1000:.1f} km, "
         f"{when['minutes_low']}-{when['minutes_high']} min, "
         f"peak {route['score']['max_pct']:.0f}%, "
@@ -563,29 +571,45 @@ def route_tooltip(route, index) -> str:
     )
 
 
-for i, route in enumerate(routes):
-    if route is selected:
-        continue
+def draw(route, index, layer, weight, opacity):
     folium.PolyLine(
-        route["coords_latlon"],
-        color=route_colour(route),
-        weight=8,                       # bold, whichever it is
-        opacity=0.75,
-        tooltip=route_tooltip(route, i),
-    ).add_to(layer_shortest if route is shortest else layer_alternates)
+        route["coords_latlon"], color=route_colour(route),
+        weight=weight, opacity=opacity, tooltip=route_tooltip(route, index),
+    ).add_to(layer)
+    # Every route has to visibly arrive. OSRM snaps to the nearest road, so a
+    # landmark set back from the carriageway leaves a short gap between where
+    # the geometry stops and the pin. A dotted stub closes it honestly —
+    # extending the road line itself would draw a street that is not there.
+    gap = route.get("gap_m", 0)
+    if gap and gap > 15:
+        folium.PolyLine(
+            [route["coords_latlon"][-1], destination],
+            color=route_colour(route), weight=3, opacity=0.9, dash_array="4",
+            tooltip=f"Last {gap} m on foot to {destination_name}",
+        ).add_to(layer)
 
-# The selection gets a white casing underneath and a heavier line on top, so
-# it stands out without borrowing a colour that already means "passable".
+
+for i, route in enumerate(routes):
+    if route is chosen:
+        continue
+    draw(route, i, layer_routes, weight=6, opacity=0.65)
+
+# The recommendation goes on last, thickest, with a white casing under it so
+# it reads as the answer rather than as one line among several.
+best_index = routes.index(chosen) if chosen in routes else 0
 folium.PolyLine(
-    selected["coords_latlon"], color="#FFFFFF", weight=16, opacity=0.9,
-).add_to(layer_selected)
-folium.PolyLine(
-    selected["coords_latlon"],
-    color=route_colour(selected),
-    weight=9, opacity=1.0,
-    tooltip=route_tooltip(selected,
-                          routes.index(selected) if selected in routes else 0),
-).add_to(layer_selected)
+    chosen["coords_latlon"], color="#FFFFFF", weight=16, opacity=0.9,
+).add_to(layer_best)
+draw(chosen, best_index, layer_best, weight=9, opacity=1.0)
+
+# If the user has picked something other than the recommendation, outline that
+# too so the selection is never invisible.
+if selected is not chosen:
+    folium.PolyLine(
+        selected["coords_latlon"], color="#20303F", weight=13, opacity=0.35,
+    ).add_to(layer_routes)
+    draw(selected, routes.index(selected) if selected in routes else 0,
+         layer_routes, weight=8, opacity=1.0)
 
 # Mark the stretches that are wet, on whichever routes cross them.
 for route in routes:
@@ -609,9 +633,8 @@ for drain in drains.values():
 
 # Order matters: the unselected routes go down first so the selection, with
 # its white casing, sits on top of them.
-layer_shortest.add_to(fmap)
-layer_alternates.add_to(fmap)
-layer_selected.add_to(fmap)
+layer_routes.add_to(fmap)
+layer_best.add_to(fmap)
 layer_water.add_to(fmap)
 layer_drains.add_to(fmap)
 
@@ -624,27 +647,42 @@ for label, point in (("A", origin), ("B", destination)):
 folium.LayerControl(collapsed=False, position="topleft").add_to(fmap)
 
 render_map(fmap, height=560)
-safe_alternates = [r for r in routes if r is not shortest and is_passable(r)]
+safe_alternates = [r for r in routes if r is not chosen and is_passable(r)]
 st.caption(
-    "**Colour means one thing: can you get through.** Bold blue is passable "
-    "for this vehicle, red is not — and that applies to the shortest route and "
-    "to every alternate alike, so a flooded alternate never looks safe just "
-    "because it is the alternate. The route with the white outline is the one "
-    "you have selected. Small red dots are flooded stretches; switch any layer "
-    "off with the box on the map."
+    "**Bold blue with a white outline is the best route** — the one to take. "
+    "Paler blue lines are the other passable options. **Red** is a route whose "
+    "worst point is past the line for this vehicle, whether it is the shortest "
+    "way or an alternate. A dotted tail means the road geometry stops short of "
+    "the pin and the last few metres are on foot. Small red dots are flooded "
+    "stretches; switch any layer off with the box on the map."
 )
-if not is_passable(shortest) and safe_alternates:
-    st.success(
-        f"**The shortest route is red — it crosses "
-        f"{shortest['score']['flooded_m']} m of standing water.** The blue "
-        f"line is the way around it: "
-        f"{safe_alternates[0].get('label', 'the alternate')}, "
-        f"{safe_alternates[0]['distance_m'] / 1000:.1f} km."
+
+if fetched.get("endpoints_uncertain"):
+    st.warning(
+        f"**Check the last stretch.** The road network's nearest point to "
+        f"{destination_name} is some way from the pin, so these routes get you "
+        f"close rather than exactly there. They are still shown, because a "
+        f"route that ends a few hundred metres out is more use than no route "
+        f"at all."
+    )
+elif fetched.get("dropped"):
+    st.caption(
+        "Not drawn, because they did not actually reach "
+        f"{destination_name}: " + ", ".join(fetched["dropped"]) + "."
+    )
+
+if not is_passable(chosen):
+    st.error(
+        f"**Every route is flooded, including the best of them.** The "
+        f"recommendation peaks at {chosen['score']['max_pct']:.0f}% over "
+        f"{chosen['score']['flooded_m']} m. Consider waiting."
     )
 elif not is_passable(shortest):
-    st.error(
-        "The shortest route is flooded and no alternate on offer is clear "
-        "either. Every line on the map is red. Consider waiting."
+    st.success(
+        f"**The shortest way is red — it crosses "
+        f"{shortest['score']['flooded_m']} m of standing water.** The bold "
+        f"blue line is the way around it: {chosen.get('label', 'the alternate')}, "
+        f"{chosen['distance_m'] / 1000:.1f} km."
     )
 
 # --------------------------------------------------------------------------- #

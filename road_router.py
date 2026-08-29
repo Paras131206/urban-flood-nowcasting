@@ -285,6 +285,37 @@ def detour_waypoints(
     return [(name, point) for _, name, point in candidates[:limit]]
 
 
+# How far a route's own endpoints may sit from the ones that were asked for.
+#
+# This was 250 m and that was much too tight. OSRM snaps every request to the
+# nearest road, and several of the landmarks here are nowhere near one: Bandra
+# Fort sits on a promontory, Bandra Reclamation is open ground. A snap of
+# several hundred metres at either is completely normal, so a 250 m limit threw
+# away perfectly good routes and left the page with nothing to draw.
+#
+# A kilometre still catches what this check is for — a route that ends
+# somewhere else entirely misses by kilometres, not by a car park — while never
+# rejecting a legitimate snap.
+ENDPOINT_TOLERANCE_M = 1200.0
+
+
+def reaches(route: dict, origin: Tuple[float, float],
+            destination: Tuple[float, float],
+            tolerance_m: float = ENDPOINT_TOLERANCE_M) -> bool:
+    """Does this route actually run from the origin to the destination?"""
+    coords = route.get("coords_latlon") or []
+    if len(coords) < 2:
+        return False
+    return (haversine_m(coords[0], origin) <= tolerance_m
+            and haversine_m(coords[-1], destination) <= tolerance_m)
+
+
+def endpoint_gap_m(route: dict, destination: Tuple[float, float]) -> float:
+    """How far short of the destination the road geometry stops."""
+    coords = route.get("coords_latlon") or []
+    return haversine_m(coords[-1], destination) if coords else float("inf")
+
+
 def _broadly_same(a: dict, b: dict, tolerance_m: float = 60.0) -> bool:
     """Are these two routes the same road, give or take?
 
@@ -355,12 +386,42 @@ def plan_journey(
     if fetched["error"]:
         return {"ok": False, "error": fetched["error"], "routes": []}
 
+    # Keep the routes that genuinely arrive, but never let this check empty the
+    # list. A validation that can leave the page with nothing to show has to
+    # degrade rather than fail: a route whose endpoint is a little off is far
+    # more use to someone standing in the rain than an error message. So if
+    # filtering would remove everything, keep them all and say so instead.
+    offered = list(fetched["routes"])
+    arriving = [r for r in offered if reaches(r, origin, destination)]
+    dropped = []
+    fell_back = False
+
+    if not arriving:
+        arriving = offered
+        fell_back = True
+        dropped.append(
+            "none of the routes offered ended close to the destination, so "
+            "they are shown anyway — check the last stretch yourself"
+        )
+    else:
+        for index, route in enumerate(offered):
+            if not any(kept is route for kept in arriving):
+                dropped.append(f"Option {index + 1} (does not reach the destination)")
+
     routes = []
-    for index, route in enumerate(fetched["routes"]):
+    for index, route in enumerate(arriving):
         route["score"] = score_route(route["coords_latlon"], drains, depths, threshold_pct)
         route["label"] = "Direct" if index == 0 else f"Alternative {index}"
         route["via"] = None
+        route["gap_m"] = round(endpoint_gap_m(route, destination))
         routes.append(route)
+
+    if not routes:
+        # Only reachable when OSRM returned an empty list, which fetch_routes
+        # already treats as an error — but never return a dict the caller
+        # cannot read.
+        return {"ok": False, "routes": [],
+                "error": "OSRM returned no usable route."}
 
     fastest = min(routes, key=lambda r: r["duration_s"])
     clear = [r for r in routes if r["score"]["max_pct"] < threshold_pct]
@@ -397,9 +458,16 @@ def plan_journey(
             if attempt["error"] or not attempt["routes"]:
                 continue
             route = attempt["routes"][0]
+            # A detour is optional, so it can be held to the standard strictly
+            # — rejecting one costs the user nothing but a second opinion.
+            if not fell_back and not reaches(route, origin, destination):
+                dropped.append(f"Detour via {name} (does not reach the destination)")
+                tried_detours[-1] = f"{name} (dead end)"
+                continue
             route["score"] = score_route(route["coords_latlon"], drains, depths, threshold_pct)
             route["label"] = f"Detour via {name}"
             route["via"] = name
+            route["gap_m"] = round(endpoint_gap_m(route, destination))
 
             # A detour that retraces the route we already have is not an
             # alternative, however differently it was built.
@@ -442,6 +510,8 @@ def plan_journey(
         "threshold_pct": threshold_pct,
         "prefer": prefer,
         "alternatives": max(len(routes) - 1, 0),
+        "dropped": dropped,
+        "endpoints_uncertain": fell_back,
     }
 
 
